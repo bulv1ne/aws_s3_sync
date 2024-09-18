@@ -13,6 +13,7 @@ import (
 	"io"
 	"iter"
 	"os"
+	"sync"
 )
 
 func main() {
@@ -61,27 +62,30 @@ func main() {
 			totalSize,
 			"uploading",
 		)
-		jobs := make(chan CopyFileInput, len(sourceObjects))
+		jobs := make(chan CopyFileInput, 1)
 		results := make(chan int64)
 
-		const numWorkers = 4
-		for i := 0; i < numWorkers; i++ {
-			go worker(jobs, results)
+		const numWorkers = 50
+		var wg sync.WaitGroup
+		for i := 0; i < min(numWorkers, len(sourceObjects)); i++ {
+			wg.Add(1)
+			go worker(&wg, jobs, results)
 		}
-		for _, object := range sourceObjects {
-			fmt.Println(*object.Key)
-			jobs <- CopyFileInput{
-				sourceS3Client,
-				destS3Client,
-				sourceBucket,
-				destBucket,
-				object,
+		go func() {
+			for _, object := range sourceObjects {
+				jobs <- CopyFileInput{
+					sourceS3Client,
+					destS3Client,
+					sourceBucket,
+					destBucket,
+					object,
+				}
 			}
-		}
-		close(jobs)
-		fmt.Println("Closing jobs")
-		for i := 0; i < len(sourceObjects); i++ {
-			size := <-results
+			close(jobs)
+			wg.Wait()
+			close(results)
+		}()
+		for size := range results {
 			err := bar.Add(int(size))
 			if err != nil {
 				fmt.Printf("err=%v\n", err)
@@ -90,18 +94,20 @@ func main() {
 	}
 }
 
-func worker(jobs <-chan CopyFileInput, results chan<- int64) {
+func worker(wg *sync.WaitGroup, jobs <-chan CopyFileInput, results chan<- int64) {
 	for copyFileInput := range jobs {
 		size := *copyFileInput.object.Size
 		err := CopyFile(
 			context.Background(),
 			copyFileInput,
 		)
+
 		results <- size
 		if err != nil {
 			panic(err)
 		}
 	}
+	wg.Done()
 }
 
 func NewSourceObjects(sourceS3Client *s3.Client, destS3Client *s3.Client, sourceBucket *string, destBucket *string, prefix *string) iter.Seq[types.Object] {
