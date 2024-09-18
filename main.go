@@ -47,45 +47,76 @@ func main() {
 	sourceS3Client := S3ClientFromProfile(*sourceProfile)
 	destS3Client := S3ClientFromProfile(*destProfile)
 
-	destObjects := make(map[string]types.Object)
-	for object := range ListObjectsV2(destS3Client, &s3.ListObjectsV2Input{Bucket: destBucket, Prefix: prefix}) {
-		destObjects[*object.Key] = object
-	}
-
 	var sourceObjects []types.Object
-	var totalSize int64 = 0
-	for object := range ListObjectsV2(sourceS3Client, &s3.ListObjectsV2Input{Bucket: sourceBucket, Prefix: prefix}) {
-		val, exists := destObjects[*object.Key]
-		if !exists || *val.ETag != *object.ETag {
-			sourceObjects = append(sourceObjects, object)
-			totalSize += *object.Size
-		}
+	var totalSize int64
+	for object := range NewSourceObjects(sourceS3Client, destS3Client, sourceBucket, destBucket, prefix) {
+		sourceObjects = append(sourceObjects, object)
+		totalSize += *object.Size
 	}
-	fmt.Println(len(sourceObjects))
+	fmt.Println(len(sourceObjects), "objects to copy")
+	fmt.Println(totalSize/1024, "KiB")
 
 	if !*dryRun && totalSize > 0 {
 		bar := progressbar.DefaultBytes(
 			totalSize,
 			"uploading",
 		)
+		jobs := make(chan CopyFileInput, len(sourceObjects))
+		results := make(chan int64)
+
+		const numWorkers = 4
+		for i := 0; i < numWorkers; i++ {
+			go worker(jobs, results)
+		}
 		for _, object := range sourceObjects {
-			err := CopyFile(
-				context.Background(),
-				CopyFileInput{
-					sourceS3Client: sourceS3Client,
-					destS3Client:   destS3Client,
-					sourceBucket:   sourceBucket,
-					destBucket:     destBucket,
-					object:         object,
-				},
-			)
-			if err != nil {
-				panic(err)
+			fmt.Println(*object.Key)
+			jobs <- CopyFileInput{
+				sourceS3Client,
+				destS3Client,
+				sourceBucket,
+				destBucket,
+				object,
 			}
-			size := *object.Size
-			err = bar.Add(int(size))
+		}
+		close(jobs)
+		fmt.Println("Closing jobs")
+		for i := 0; i < len(sourceObjects); i++ {
+			size := <-results
+			err := bar.Add(int(size))
 			if err != nil {
-				panic(err)
+				fmt.Printf("err=%v\n", err)
+			}
+		}
+	}
+}
+
+func worker(jobs <-chan CopyFileInput, results chan<- int64) {
+	for copyFileInput := range jobs {
+		size := *copyFileInput.object.Size
+		err := CopyFile(
+			context.Background(),
+			copyFileInput,
+		)
+		results <- size
+		if err != nil {
+			panic(err)
+		}
+	}
+}
+
+func NewSourceObjects(sourceS3Client *s3.Client, destS3Client *s3.Client, sourceBucket *string, destBucket *string, prefix *string) iter.Seq[types.Object] {
+	return func(yield func(types.Object) bool) {
+		destObjects := make(map[string]types.Object)
+		for object := range ListObjectsV2(destS3Client, &s3.ListObjectsV2Input{Bucket: destBucket, Prefix: prefix}) {
+			destObjects[*object.Key] = object
+		}
+
+		for object := range ListObjectsV2(sourceS3Client, &s3.ListObjectsV2Input{Bucket: sourceBucket, Prefix: prefix}) {
+			val, exists := destObjects[*object.Key]
+			if !exists || *val.ETag != *object.ETag {
+				if !yield(object) {
+					return
+				}
 			}
 		}
 	}
