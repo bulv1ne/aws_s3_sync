@@ -189,7 +189,7 @@ func ListObjectsV2(s3Client *s3.Client, params *s3.ListObjectsV2Input) iter.Seq[
 			if err != nil {
 				panic(err)
 			}
-			if !yieldContents(yield, result.Contents) {
+			if !yieldSlice(yield, result.Contents) {
 				return
 			}
 
@@ -202,8 +202,8 @@ func ListObjectsV2(s3Client *s3.Client, params *s3.ListObjectsV2Input) iter.Seq[
 	}
 }
 
-func yieldContents[T any](yield func(T) bool, contents []T) bool {
-	for _, item := range contents {
+func yieldSlice[T any](yield func(T) bool, slice []T) bool {
+	for _, item := range slice {
 		if !yield(item) {
 			return false
 		}
