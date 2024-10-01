@@ -24,6 +24,7 @@ func main() {
 	destProfile := fs.StringLong("dest-profile", "", "Dest profile")
 	prefix := fs.StringLong("prefix", "", "S3 Prefix")
 	dryRun := fs.BoolLong("dryrun", "Dry run the operation")
+	_ = fs.StringLong("config", "", "config file (optional)")
 
 	err := ff.Parse(
 		fs,
